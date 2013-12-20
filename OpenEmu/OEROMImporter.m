@@ -87,9 +87,6 @@ NSString *const OEImportInfoArchivedFileIndex = @"archivedFileIndex";
 - (void)performImportStepOrganize:(OEImportItem *)item;
 - (void)performImportStepOrganizeAdditionalFiles:(OEImportItem *)item;
 
-- (void)performImportStepCreateRom:(OEImportItem *)item;
-- (void)performImportStepCreateGame:(OEImportItem *)item;
-
 - (void)performImportStepCreateCoreDataObjects:(OEImportItem *)item;
 
 - (void)scheduleItemForNextStep:(OEImportItem *)item;
@@ -140,6 +137,7 @@ NSString *const OEImportInfoArchivedFileIndex = @"archivedFileIndex";
 
 - (void)processNextItem
 {
+    DLog();
     if([self status] != OEImporterStatusRunning)
         return;
 
@@ -305,50 +303,73 @@ static void importBlock(OEROMImporter *importer, OEImportItem *item)
 - (void)performImportStepCheckArchiveFile:(OEImportItem *)item
 {
     IMPORTDLog(@"URL: %@", [item sourceURL]);
-    //Short circuit this?
     NSString *path = [[item URL] path];
     XADArchive *archive = [XADArchive archiveForFile:path];
-    if (archive && [archive numberOfEntries] == 1)
+    if (archive != nil)
     {
+        NSMutableArray *newItems = [NSMutableArray arrayWithCapacity:[archive numberOfEntries]];
+
         NSString *formatName = [archive formatName];
         if ([formatName isEqualToString:@"MacBinary"])
             return;
         
-        if (![archive entryHasSize:0] || [archive entryIsEncrypted:0] || [archive entryIsDirectory:0] || [archive entryIsArchive:0])
-            return;
-        
-        NSString *folder = temporaryDirectoryForDecompressionOfPath(path);
-        NSString *name = [archive nameOfEntry:0];
-        if ([[name pathExtension] length] == 0 && [[path pathExtension] length] > 0) {
-            // this won't do. Re-add the archive's extension in case it's .smc or the like
-            name = [name stringByAppendingPathExtension:[path pathExtension]];
-        }
-        NSString *tmpPath = [folder stringByAppendingPathComponent:name];
-        
-        BOOL isdir;
-        NSURL *tmpURL = [NSURL fileURLWithPath:tmpPath];
-        NSFileManager *fm = [NSFileManager new];
-        if ([fm fileExistsAtPath:tmpPath isDirectory:&isdir] && !isdir) {
-            DLog(@"Found existing decompressed ROM for path %@", path);
-            [[item importInfo] setValue:tmpURL forKey:OEImportInfoArchivedFileURL];
-            [[item importInfo] setValue:@(0) forKey:OEImportInfoArchivedFileIndex];
-            return;
-        }
-        
-        BOOL success = YES;
-        @try {
-            success = [archive _extractEntry:0 as:tmpPath];
-        }
-        @catch (NSException *exception) {
-            success = NO;
-        }
-        if (success)
+        for(int i=0; i<[archive numberOfEntries]; i++)
         {
-            [[item importInfo] setValue:tmpURL forKey:OEImportInfoArchivedFileURL];
-            [[item importInfo] setValue:@(0) forKey:OEImportInfoArchivedFileIndex];
+            if(![archive entryHasSize:i] || [archive entryIsEncrypted:i] || [archive entryIsDirectory:i] || [archive entryIsArchive:i])
+            {
+                DLog(@"Entry %d is either empty, or a directory or encrypted or iteself an archive", i);
+                continue;
+            }
+            
+            NSString *folder = temporaryDirectoryForDecompressionOfPath(path);
+            NSString *name = [archive nameOfEntry:i];
+            if ([[name pathExtension] length] == 0 && [[path pathExtension] length] > 0) {
+                // this won't do. Re-add the archive's extension in case it's .smc or the like
+                name = [name stringByAppendingPathExtension:[path pathExtension]];
+            }
+            NSString *tmpPath = [folder stringByAppendingPathComponent:name];
+            
+            BOOL isdir;
+            NSURL *tmpURL = [NSURL fileURLWithPath:tmpPath];
+            NSFileManager *fm = [NSFileManager defaultManager];
+            if (![fm fileExistsAtPath:tmpPath isDirectory:&isdir]) {
+                @try
+                {
+                    [archive _extractEntry:i as:tmpPath];
+                }
+                @catch (NSException *exception) {
+                    [fm removeItemAtPath:folder error:nil];
+                    tmpURL = nil;
+                    DLog(@"unpack faield");
+                }
+            }
+            
+            if(tmpURL)
+            {
+                OEImportItem *subItem = [[OEImportItem alloc] init];
+                [subItem setImportInfo:[[item importInfo] mutableCopy]];
+                [subItem setImportState:OEImportItemStatusIdle];
+                [subItem setImportStep:OEImportStepDetermineSystem];
+                [subItem setArchive:item];
+                [[subItem importInfo] setValue:tmpURL forKey:OEImportInfoArchivedFileURL];
+                [[subItem importInfo] setValue:@(i)   forKey:OEImportInfoArchivedFileIndex];
+                [newItems addObject:subItem];
+                NSLog(@"%@ | %@", [subItem URL], [item URL]);
+            }
         }
-        else
-            [fm removeItemAtPath:folder error:nil];
+
+        NSUInteger currentIndex = [[self queue] indexOfObjectIdenticalTo:item];
+        NSIndexSet *newItemIndexes = [NSIndexSet indexSetWithIndexesInRange:NSMakeRange(currentIndex+1, [newItems count])];
+        [[self queue] insertObjects:newItems atIndexes:newItemIndexes];
+        self.totalNumberOfItems += [newItems count];
+        DLog(@"newItems: %@", newItems);
+
+        self.totalNumberOfItems--;
+        [self OE_performSelectorOnDelegate:@selector(romImporterChangedItemCount:) withObject:self];
+
+        [item setImportState:OEImportItemStatusFinished];
+        [[self queue] removeObjectAtIndex:currentIndex];
+        [self processNextItem];
     }
 }
 
@@ -489,7 +510,6 @@ static void importBlock(OEROMImporter *importer, OEImportItem *item)
     NSError *error       = nil;
     NSURL   *url         = [item URL];
     
-    
     // Unlock rom file so we can rename the copy directly
     BOOL romFileLocked = NO;
     if([[[[NSFileManager defaultManager] attributesOfItemAtPath:[url path] error:&error] objectForKey:NSFileImmutable] boolValue])
@@ -499,6 +519,7 @@ static void importBlock(OEROMImporter *importer, OEImportItem *item)
     }
     
     // Copy to library folder if it's not already there
+    NSLog(@"\t%@\n\t%@\n\t->> %d", url, [[self database] romsFolderURL], [url isSubpathOfURL:[[self database] romsFolderURL]]);
     if(copyToLibrary && ![url isSubpathOfURL:[[self database] romsFolderURL]])
     {
         NSString *fullName  = [url lastPathComponent];
@@ -507,6 +528,7 @@ static void importBlock(OEROMImporter *importer, OEImportItem *item)
         
         NSURL *unsortedFolder = [[self database] unsortedRomsFolderURL];
         NSURL *romURL         = [unsortedFolder URLByAppendingPathComponent:fullName];
+
         romURL = [romURL uniqueURLUsingBlock:^NSURL *(NSInteger triesCount) {
             NSString *newName = [NSString stringWithFormat:@"%@ %ld.%@", baseName, triesCount, extension];
             return [unsortedFolder URLByAppendingPathComponent:newName];
@@ -558,6 +580,12 @@ static void importBlock(OEROMImporter *importer, OEImportItem *item)
         
         NSURL *systemFolder = [[self database] romsFolderURLForSystem:system];
         NSURL *romURL       = [systemFolder URLByAppendingPathComponent:fullName];
+        if([romURL isEqualTo:url])
+        {
+            [item setURL:romURL];
+            return;
+        }
+        
         romURL = [romURL uniqueURLUsingBlock:
                   ^ NSURL *(NSInteger triesCount)
                   {
@@ -672,7 +700,7 @@ static void importBlock(OEROMImporter *importer, OEImportItem *item)
         }
         else
         {
-            NSURL *url = [rom URL];
+            NSURL *url = [importInfo objectForKey:OEImportInfoArchivedFileURL] ?: [rom URL];
             NSString *gameTitleWithSuffix = [url lastPathComponent];
             NSString *gameTitleWithoutSuffix = [gameTitleWithSuffix stringByDeletingPathExtension];
             game = [OEDBGame createGameWithName:gameTitleWithoutSuffix andSystem:system inDatabase:[self database]];
