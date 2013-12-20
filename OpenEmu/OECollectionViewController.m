@@ -1105,8 +1105,17 @@ static NSArray *OE_defaultSortDescriptors;
                     }];
                     
                     if([[NSFileManager defaultManager] copyItemAtURL:url toURL:romURL error:nil] && (alertResult == -1))
+                    {
+                        NSString *location = [rom location];
+                        NSFetchRequest *fetchRequest = [NSFetchRequest fetchRequestWithEntityName:[OEDBRom entityName]];
+                        NSPredicate *predicate = [NSPredicate predicateWithFormat:@"location = %@", location];
+                        [fetchRequest setPredicate:predicate];
+                        NSArray *roms = [[rom libraryDatabase] executeFetchRequest:fetchRequest error:nil];
+                        [roms enumerateObjectsUsingBlock:^(OEDBRom *obj, NSUInteger idx, BOOL *stop) {
+                            [obj setURL:romURL];
+                        }];
                         [rom setURL:romURL];
-                    
+                    }
                     if(romFileLocked)
                         [[NSFileManager defaultManager] setAttributes:@{ NSFileImmutable: @(YES) } ofItemAtPath:[url path] error:nil];
                 }
