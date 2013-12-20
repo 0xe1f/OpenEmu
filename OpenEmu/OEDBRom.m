@@ -186,7 +186,6 @@
 }
 
 #pragma mark - Accessors
-
 - (NSURL *)URL
 {
     NSString *location = [self location];
@@ -387,8 +386,20 @@
     
     if(moveToTrash && [url isSubpathOfURL:[[self libraryDatabase] romsFolderURL]])
     {
-        NSString *path = [url path];
-        [[NSWorkspace sharedWorkspace] performFileOperation:NSWorkspaceRecycleOperation source:[path stringByDeletingLastPathComponent] destination:nil files:[NSArray arrayWithObject:[path lastPathComponent]] tag:NULL];
+        NSInteger count = 1;
+        if([self archiveFileIndex])
+        {
+            NSPredicate *predicate = [NSPredicate predicateWithFormat:@"location == %@", [self location]];
+            NSFetchRequest *fetchRequest = [NSFetchRequest fetchRequestWithEntityName:[[self class] entityName]];
+            [fetchRequest setPredicate:predicate];
+            count = [[self libraryDatabase] countForFetchRequest:fetchRequest error:nil];
+         }
+        
+        if(count == 1)
+        {
+            NSString *path = [url path];
+            [[NSWorkspace sharedWorkspace] performFileOperation:NSWorkspaceRecycleOperation source:[path stringByDeletingLastPathComponent] destination:nil files:[NSArray arrayWithObject:[path lastPathComponent]] tag:NULL];
+        } else DLog(@"Keeping file, other roms depent on it!");
     }
     
     if(!statesFlag)
