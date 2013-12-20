@@ -465,6 +465,7 @@ static void importBlock(OEROMImporter *importer, OEImportItem *item)
         if([[item importInfo] valueForKey:OEImportInfoArchivedFileURL])
         {
             [[item importInfo] removeObjectForKey:OEImportInfoArchivedFileURL];
+            [[item importInfo] removeObjectForKey:OEImportInfoArchivedFileIndex];
             [self performImportStepDetermineSystem:item];
         }
         else
